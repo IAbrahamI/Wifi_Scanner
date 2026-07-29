@@ -3,3 +3,6 @@
 !.vscode/extensions.json
 *.pyc
 __pycache__/
+
+# Your Wi-Fi credentials for CSI active mode -- never commit these.
+src/csi/credentials.h

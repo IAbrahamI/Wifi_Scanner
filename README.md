@@ -7,7 +7,7 @@ which one boots.
 | Slot | Partition | Offset | App | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | 0 | `factory` | `0x010000` | Touch launcher | ✅ built |
-| 1 | `ota_0` | `0x210000` | Wi-Fi CSI radar tracker | 🔲 reserved, not implemented |
+| 1 | `ota_0` | `0x210000` | Wi-Fi CSI radar tracker | ✅ built |
 | 2 | `ota_1` | `0x610000` | Wi-Fi + BLE proximity sniffer | ✅ built |
 
 ---
@@ -30,6 +30,7 @@ bootloader falls back to when `otadata` is blank.
 
 ```bash
 pio run -e menu    -t upload    # launcher   -> 0x010000
+pio run -e csi     -t upload    # CSI radar  -> 0x210000
 pio run -e scanner -t upload    # WiFi + BLE -> 0x610000
 pio device monitor
 ```
@@ -88,14 +89,202 @@ away from the onboard ceramic antenna. It is a rework, not a plug-in, and it is
 irreversible without more rework. Worth deferring until the firmware side is
 proven.
 
-**On CSI feasibility.** The ESP32's CSI output is real and the "radio shadow"
-effect is real, but the 3–8 m "path vectors / direction" figure in the concept
-doc is optimistic for a single antenna. One RX chain gives you amplitude and
-phase variance over time — a good motion/presence signal — but not bearing.
-Direction of arrival needs multiple spatially separated receivers, which is what
-the ESP-NOW mesh idea in the concept doc would actually buy you. Worth planning
-the CSI app around *presence and turbulence* first, and treating localisation as
-a later multi-node problem.
+---
+
+## How the CSI radar works
+
+Every frame the radio receives carries a per-subcarrier estimate of what the air
+did to it in flight. A body moving between transmitter and receiver perturbs
+those estimates. Watch them over time and you have a motion sensor that needs
+nothing on or near the target.
+
+Two constraints drive the whole design, and neither is obvious from the concept
+doc:
+
+**CSI is only meaningful per link.** Every transmitter has its own channel
+response, so averaging frames from several APs produces a signal that looks
+exactly like motion but is just transmitter-hopping. The app locks onto a single
+source MAC and discards everything else. That is what `SEARCHING` means on boot.
+
+**It needs a steady packet rate, and getting one is the hard part.** This turned
+out to be the dominant problem in the whole project — see
+[Limitations](#limitations) for the measurements. Short version: passive
+listening yields single-digit Hz, which is not enough, so the app ships two
+active illumination modes. The header shows `locked/total Hz` and turns red
+below 5 Hz, because everything downstream is meaningless without it.
+
+**Using it:** pick an illumination source on the channel picker, wait for
+warmup, stand out of the path while it auto-calibrates, then move. The score is
+a multiple of the calibrated empty-room baseline — 1.0x is a quiet room, and the
+graph's guide lines sit at the disturbance and motion thresholds.
+
+### Choosing illumination
+
+The picker offers three, in descending order of how well they work:
+
+| Mode | Rate | Notes |
+| :--- | :--- | :--- |
+| `JOIN` (active link) | ~100 Hz | Associates to your AP and pings it. Needs `credentials.h`. The only mode that reliably works. |
+| `PROBE: ON` | 0 Hz measured | Probe requests to an AP without associating. Transmits fine; the replies carry no CSI. Kept because it costs nothing and may work on APs with 802.11b disabled. |
+| `PROBE: OFF` (passive) | 0–7 Hz | Pure listening. Broadcast traffic only. |
+
+The `CSI Hz` column measures each channel live rather than inferring it from AP
+count, because the two diverge badly — a channel with the most APs and the
+strongest signal can still yield exactly zero.
+
+### Why the radar view shows rings, not blips
+
+The obvious thing to want is a dot on a map. That is not recoverable from this
+hardware, for three independent reasons:
+
+**Bandwidth sets range resolution.** A 20 MHz channel gives delay bins 50 ns
+apart, and 50 ns of propagation is 15 m of path length. The whole useful sensing
+range fits inside one bin. Super-resolution (MUSIC, ESPRIT) might get that to
+3–4 m with good SNR — still coarser than the room.
+
+**There is no clock shared with the transmitter.** Real radar knows when it
+transmitted. This is passively receiving someone else's beacon, and per-packet
+timing jitter plus sampling-frequency offset randomise the absolute delay by
+hundreds of nanoseconds. Only changes between packets survive; absolute range
+never does.
+
+**The geometry is bistatic.** The measurement is not AP→gadget, it is
+AP→person→gadget: the total path. That describes an ellipse with the AP and the
+gadget at its foci, and every point on it produces an identical reading. Without
+knowing where the AP is, distance from the gadget is one equation in two
+unknowns.
+
+So the rings are labelled `NEAR`/`MID`/`FAR` and driven by disturbance
+*intensity*, which correlates with proximity to the AP-to-gadget path but also
+with how much of the body is moving — a person waving at 5 m outproduces a
+person standing still at 1 m. A detection lights the entire ring rather than a
+point on it, because a single antenna gives no bearing and a blip at an angle
+would be fabricated. The rotating sweep is decoration; the receiver is not
+steering anything.
+
+If the bands feel wrong for your room, the next easy improvement is a two-point
+calibration (stand near, stand far) to anchor the thresholds to real positions
+instead of the current fixed multiples. Actual coordinates need the multi-node
+ESP-NOW mesh.
+
+### On `esp-dsp` and SIMD
+
+The spec calls for 128-bit SIMD via `esp-dsp`. I left it out deliberately. The
+workload is ~64 subcarriers at roughly 10–50 packets/second — a few thousand
+float operations per second, which the S3's FPU handles in microseconds. Adding
+a DSP dependency would buy no measurable headroom and complicate the build. If
+we later move to a dedicated high-rate transmitter and push into the kHz range,
+it becomes worth revisiting.
+
+---
+
+## Limitations
+
+Written down because most of these are not fixable by tuning, and several of
+them contradict the concept documents. Anything marked **measured** was observed
+on this hardware, not reasoned about.
+
+### 1. Illumination — the binding constraint
+
+This is the one that shapes everything else.
+
+**The ESP32 only produces CSI for frames addressed to us, or broadcast.**
+Unicast traffic between other devices is invisible to the CSI engine even in
+promiscuous mode. *Measured:* a 2 GB download running on the router's own
+channel produced **0 CSI frames** — every frame in it was addressed to the
+laptop, not to us.
+
+**DSSS frames carry no CSI at all, and cannot be made to.** CSI *is* the
+per-subcarrier channel response; 802.11b spreads a single carrier with no
+subcarriers, so there is nothing to measure. This is not a filter that can be
+loosened, and DSSS data cannot be "mixed in" with OFDM data. On most 2.4 GHz
+routers 802.11b compatibility is on by default, which means beacons go out at
+1 Mbit/s DSSS and contribute nothing.
+
+**Everything an unassociated station can elicit is a management frame**, and
+management frames go out at the AP's *lowest basic rate* — DSSS, per the above.
+Advertising OFDM-only support in our probe requests does not change this,
+because the AP selects from its own basic-rate set. *Measured:* 2176 probe
+requests transmitted, 0 driver errors, 0 CSI frames returned.
+
+The consequence: **fully passive CSI sensing does not work on a typical home
+network.** Observed ambient rates were 0–7 Hz where roughly 50 Hz is wanted.
+Active mode (associate + ping) is not a convenience, it is what makes the app
+function. The one route back to passive is disabling 802.11b legacy rates on the
+router, which forces beacons to OFDM.
+
+### 2. What the radar cannot tell you
+
+**No distance in metres.** Three independent blocks, any one sufficient:
+20 MHz of bandwidth puts delay bins 15 m apart in path length; there is no clock
+shared with the transmitter, so absolute time-of-flight is unrecoverable; and
+the geometry is bistatic (AP→person→gadget), which describes an ellipse of
+identical readings rather than a range. The `NEAR`/`MID`/`FAR` rings are
+disturbance *intensity*, which is confounded by how much of the body is moving —
+a person waving at 5 m outproduces a person standing still at 1 m.
+
+**No bearing.** One antenna, one receive chain. Direction of arrival needs
+several spatially separated receivers. A detection therefore lights a whole ring
+rather than a point; the rotating sweep is decoration.
+
+**No counting, and no identity.** One aggregate disturbance figure. Two people
+are not distinguishable from one moving more.
+
+**A motionless person fades into the background.** The steady-state estimate
+keeps adapting, so someone perfectly still is absorbed within roughly 100 frames
+and reads as `CLEAR`. This is a motion detector, not a presence detector.
+Breathing-rate detection would need a much higher and steadier frame rate.
+
+### 3. Sensing geometry
+
+Range is governed by geometry, not by the noise floor. The target must be near
+the line between the illuminating AP and the gadget. Someone crossing that line
+6 m out registers strongly; someone walking right past the device but off-path
+may not register at all. The concept doc's "3–8 m optimal, capable of
+calculating path vectors/direction" is not reachable with this hardware.
+
+### 4. Calibration is positional and perishable
+
+The baseline describes one gadget position, one AP, one channel, one furniture
+arrangement. Moving the gadget, switching channels, or the AP changing its rate
+invalidates it — which is why changing channel resets everything and
+re-calibrates. Calibrating while someone is in the path bakes them into the
+baseline and the room reads `CLEAR` with them standing there.
+
+### 5. Hardware ceilings
+
+- **2.4 GHz only.** The ESP32-S3 has no 5 GHz radio. A dual-band antenna's
+  5 GHz half is dead weight.
+- **No U.FL connector from the factory.** The external-antenna mod means moving
+  a 0-ohm resistor on the module — a rework, not a plug-in.
+- **One radio front-end, shared.** In the scanner app Wi-Fi and BLE time-slice
+  the same 2.4 GHz front end; BLE is held to a ~19% duty cycle so the Wi-Fi
+  sweeps get enough uninterrupted dwell to hear a beacon. Both are slower than
+  either would be alone.
+
+### 6. Scanner app
+
+**BLE MAC randomisation defeats tracking.** Phones and wearables rotate their
+advertised address roughly every 15 minutes, so the same device reappears as a
+new entry. The manufacturer ID survives rotation (an iPhone still says "Apple"),
+which is why vendor and device-type decoding exist — but correlating a device
+across a rotation is not implemented and is a substantially harder problem.
+
+**Apple Continuity decoding is reverse-engineered**, not documented by Apple.
+Common message types are reliable; unrecognised ones show as `Apple type NN`
+with the raw payload rather than a guess. AirPods model IDs cover the
+well-established ones only.
+
+**Distance estimates are bands, not measurements.** RSSI-to-distance assumes a
+free-space path loss model; indoors, with walls and bodies in the way, the real
+figure is easily off by 2x.
+
+### 7. Active mode trade-offs
+
+It transmits, and it needs your SSID and password in `credentials.h` (gitignored).
+Point it at your own access point. What it does *not* compromise is the core
+premise: the targets being sensed still need no connection, no app, and no
+device on them.
 
 ---
 
@@ -109,6 +298,11 @@ tools/app_offset.py         redirects each env's upload to its own slot
 src/
   board/                    shared: pinout, LovyanGFX+touch driver, app switching
   menu/                     App 0 — launcher
+  csi/                      App 1 — CSI radar
+    csi_capture             radio setup, CSI callback, turbulence metric
+    channel_survey          measures CSI yield per channel, not just AP count
+    illuminator             probe-request illumination (unassociated)
+    active_link             associate + ping illumination (needs credentials.h)
   scanner/                  App 2 — WiFi + BLE sniffer
 ```
 
@@ -117,18 +311,20 @@ directory, so the apps stay fully independent binaries.
 
 ## Status
 
-Both apps compile clean (PlatformIO Core 6.1.19, espressif32 6.11.0, Arduino
-core 2.0.17) and the upload offsets are verified:
+All three apps compile clean (PlatformIO Core 6.1.19, espressif32 6.11.0,
+Arduino core 2.0.17) and the upload offsets are verified:
 
 | Env | Flash used | Slot size | Upload offset |
 | :--- | ---: | ---: | :--- |
-| `menu` | 375 KB | 2 MB | `0x010000` ✅ |
-| `scanner` | 991 KB | 4 MB | `0x610000` ✅ |
+| `menu` | 367 KB | 2 MB | `0x010000` ✅ |
+| `csi` | 787 KB | 4 MB | `0x210000` ✅ |
+| `scanner` | 979 KB | 4 MB | `0x610000` ✅ |
 
-**Not yet run on hardware.** The pinout, LovyanGFX panel config and partition
-logic are written from the T-Display-S3 reference but nothing has been flashed,
-so the display config in particular (colour inversion, the 35px column offset,
-touch axis mapping) is the most likely thing to need a tweak on first boot.
+**Run on hardware.** Display, touch, app switching and the Wi-Fi/BLE scanner are
+confirmed working. The CSI radar's capture path and UI are confirmed; its
+detection thresholds (`1.35`/`1.8`/`3.2` × baseline) are still first guesses and
+want tuning against real numbers. Active mode is built and compiles both with
+and without `credentials.h`, but has not yet been run against a live AP.
 
 If `pip install platformio` gives you a `ModuleNotFoundError: No module named
 'intelhex'` during the bootloader step, `pip install intelhex` into the same
