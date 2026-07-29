@@ -27,6 +27,7 @@
 #include "channel_survey.h"
 #include "csi_capture.h"
 #include "illuminator.h"
+#include "wifi_setup.h"
 
 namespace {
 
@@ -61,7 +62,7 @@ csi_capture::Stats g_stats;
 float              g_history[csi_capture::kHistoryLen];
 int                g_historyCount = 0;
 
-enum class View { Picker, Radar, Graph };
+enum class View { Picker, WifiSetup, Radar, Graph };
 View g_view = View::Picker;
 
 // Only meaningful once a channel has been chosen from the survey.
@@ -97,7 +98,8 @@ constexpr int  BANNER_TOP = 21;
 constexpr int  BANNER_H   = 14;
 constexpr int  PICK_TOP   = 49;
 constexpr int  PICK_ROW_H = 13;
-constexpr Rect kBannerBtn = {0, BANNER_TOP, SCREEN_W, BANNER_H};
+constexpr Rect kBannerBtn = {0, BANNER_TOP, SCREEN_W - 62, BANNER_H};
+constexpr Rect kSetupBtn  = {SCREEN_W - 62, BANNER_TOP, 62, BANNER_H};
 constexpr Rect kRescanBtn = {SCREEN_W - 96, FOOT_TOP, 96, SCREEN_H - FOOT_TOP};
 constexpr Rect kProbeBtn  = {0, FOOT_TOP, 150, SCREEN_H - FOOT_TOP};
 
@@ -173,31 +175,31 @@ void drawPicker() {
     // Active mode banner. Offered first because on most home networks it is the
     // only option that produces a usable frame rate at all.
     const auto linkState = active_link::state();
-    if (!active_link::configured()) {
-        canvas.setTextDatum(middle_left);
-        canvas.setTextColor(COL_GRID);
-        canvas.drawString("active mode: copy credentials.example.h -> credentials.h",
-                          8, BANNER_TOP + BANNER_H / 2);
-    } else {
-        const bool busy = linkState == active_link::State::Connecting;
-        const uint16_t col = linkState == active_link::State::Failed ? COL_MOVE
-                             : busy                                  ? COL_NEAR
-                                                                     : COL_CLEAR;
-        canvas.drawRect(6, BANNER_TOP, SCREEN_W - 12, BANNER_H, col);
-        canvas.setTextDatum(middle_left);
-        canvas.setTextColor(col);
+    const bool busy      = linkState == active_link::State::Connecting;
+    const uint16_t col   = linkState == active_link::State::Failed ? COL_MOVE
+                           : busy                                  ? COL_NEAR
+                           : active_link::configured()             ? COL_CLEAR
+                                                                   : COL_DIM;
+    canvas.drawRect(6, BANNER_TOP, SCREEN_W - 12, BANNER_H, col);
+    canvas.setTextDatum(middle_left);
+    canvas.setTextColor(col);
 
-        char buf[64];
-        if (busy) {
-            snprintf(buf, sizeof(buf), "joining %s ...", active_link::ssid());
-        } else if (linkState == active_link::State::Failed) {
-            snprintf(buf, sizeof(buf), "join failed - tap to retry");
-        } else {
-            snprintf(buf, sizeof(buf), "[ JOIN %s ]  ~100Hz, best option",
-                     active_link::ssid());
-        }
-        canvas.drawString(buf, 12, BANNER_TOP + BANNER_H / 2);
+    char banner[64];
+    if (busy) {
+        snprintf(banner, sizeof(banner), "joining %s ...", active_link::ssid());
+    } else if (linkState == active_link::State::Failed) {
+        snprintf(banner, sizeof(banner), "join failed - tap to retry");
+    } else if (active_link::configured()) {
+        snprintf(banner, sizeof(banner), "[ JOIN %s ]  ~100Hz", active_link::ssid());
+    } else {
+        snprintf(banner, sizeof(banner), "no network set - tap SET UP");
     }
+    canvas.drawString(banner, 12, BANNER_TOP + BANNER_H / 2);
+
+    canvas.setTextDatum(middle_right);
+    canvas.setTextColor(COL_TRACE);
+    canvas.drawString(active_link::configured() ? "SET UP >" : "SET UP >",
+                      SCREEN_W - 10, BANNER_TOP + BANNER_H / 2);
 
     // Column headings. "Hz" gets called out because it is the column that
     // matters and the one nobody expects to differ from AP count.
@@ -517,6 +519,15 @@ void drawGraph() {
     canvas.setTextColor(COL_DIM);
     canvas.drawString("SUBCARRIERS", 6, BARS_TOP - 10);
 
+    // Frame geometry, plus how many frames from the locked AP were dropped for
+    // having a different one. A large drop count means the AP is mixing HT and
+    // non-HT frames and we are only using a fraction of them.
+    canvas.setTextDatum(top_right);
+    canvas.setTextColor(COL_GRID);
+    snprintf(buf, sizeof(buf), "%u sc / %luB   dropped %lu", g_stats.subcarriers,
+             static_cast<unsigned long>(g_stats.frameLen), g_stats.wrongShape);
+    canvas.drawString(buf, SCREEN_W - 6, BARS_TOP - 10);
+
     const int n = g_stats.subcarriers;
     if (n > 0) {
         const int barW = max(1, (SCREEN_W - 12) / n);
@@ -530,6 +541,11 @@ void drawGraph() {
 }
 
 void render() {
+    if (g_view == View::WifiSetup) {
+        wifi_setup::draw(canvas);  // owns its own background fill
+        canvas.pushSprite(0, 0);
+        return;
+    }
     canvas.fillSprite(COL_BG);
     if (g_view == View::Picker) {
         drawPicker();
@@ -542,6 +558,11 @@ void render() {
 }
 
 void handlePickerTap(int x, int y) {
+    if (kSetupBtn.contains(x, y)) {
+        wifi_setup::start();
+        g_view = View::WifiSetup;
+        return;
+    }
     if (kBannerBtn.contains(x, y) && active_link::configured()) {
         illuminator::setEnabled(false);  // the ping stream replaces it
         active_link::connect();
@@ -572,6 +593,10 @@ void handlePickerTap(int x, int y) {
 }
 
 void handleTap(int x, int y) {
+    if (g_view == View::WifiSetup) {
+        wifi_setup::handleTap(x, y);
+        return;
+    }
     if (g_view == View::Picker) {
         handlePickerTap(x, y);
         return;
@@ -611,6 +636,7 @@ void setup() {
     canvas.pushSprite(0, 0);
 
     csi_capture::begin(g_channel);
+    active_link::begin();
     illuminator::begin();
     // On by default: passive ambient CSI is a few Hz at best, because the radio
     // only reports frames addressed to us or broadcast.
@@ -619,7 +645,26 @@ void setup() {
 }
 
 void loop() {
-    if (g_view == View::Picker) {
+    active_link::pollSerialProvisioning();
+
+    if (g_view == View::WifiSetup) {
+        wifi_setup::poll();
+
+        const auto st = wifi_setup::stage();
+        if (st == wifi_setup::Stage::Done) {
+            // Straight into NVS, then wipe the RAM copy.
+            active_link::provision(wifi_setup::chosenSsid(),
+                                   wifi_setup::enteredPassword());
+            wifi_setup::clear();
+            illuminator::setEnabled(false);
+            active_link::connect();
+            g_view = View::Picker;
+        } else if (st == wifi_setup::Stage::Cancelled) {
+            wifi_setup::clear();
+            channel_survey::start();
+            g_view = View::Picker;
+        }
+    } else if (g_view == View::Picker) {
         active_link::poll();
         // Association hands us a known transmitter on a known channel, so the
         // survey becomes irrelevant the moment it succeeds.

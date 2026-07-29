@@ -1,12 +1,16 @@
 #include "active_link.h"
 
+#include <Preferences.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
 
 #include "lwip/ip_addr.h"
 #include "ping/ping_sock.h"
 
-// Optional: absent on a fresh clone, and the firmware still has to build.
+// Optional convenience seed, absent on a fresh clone. Only consulted when NVS
+// is empty, and copied into NVS on first boot -- so the compiled-in copy stops
+// mattering after that. Provisioning over serial avoids it entirely and is the
+// better habit; see credentials.example.h.
 #if __has_include("credentials.h")
 #include "credentials.h"
 #endif
@@ -31,6 +35,12 @@ uint32_t          g_startAt = 0;
 uint8_t           g_channel = 0;
 uint8_t           g_bssid[6] = {0};
 esp_ping_handle_t g_ping    = nullptr;
+
+// Held in RAM only for the duration of a connect; the durable copy is in NVS.
+char g_ssid[33] = {0};
+char g_pass[65] = {0};
+
+constexpr const char* kNvsNamespace = "csi-link";
 
 // Incremented from the ping task.
 volatile uint32_t g_replies = 0;
@@ -66,9 +76,55 @@ void startPinging() {
 
 }  // namespace
 
-bool configured() { return strlen(CSI_WIFI_SSID) > 0; }
+void begin() {
+    Preferences prefs;
+    if (prefs.begin(kNvsNamespace, /*readOnly=*/true)) {
+        prefs.getString("ssid", g_ssid, sizeof(g_ssid));
+        prefs.getString("pass", g_pass, sizeof(g_pass));
+        prefs.end();
+    }
 
-const char* ssid() { return CSI_WIFI_SSID; }
+    // First boot with a credentials.h present: migrate it into NVS once, so
+    // from then on the device works even if the header is deleted.
+    if (g_ssid[0] == '\0' && strlen(CSI_WIFI_SSID) > 0) {
+        log_i("active_link: seeding NVS from credentials.h");
+        provision(CSI_WIFI_SSID, CSI_WIFI_PASS);
+    }
+
+    if (g_ssid[0]) log_i("active_link: provisioned for \"%s\"", g_ssid);
+}
+
+bool provision(const char* newSsid, const char* password) {
+    Preferences prefs;
+    if (!prefs.begin(kNvsNamespace, /*readOnly=*/false)) {
+        log_e("active_link: could not open NVS");
+        return false;
+    }
+
+    if (!newSsid || newSsid[0] == '\0') {
+        prefs.clear();
+        prefs.end();
+        g_ssid[0] = '\0';
+        g_pass[0] = '\0';
+        log_i("active_link: credentials cleared");
+        return true;
+    }
+
+    strncpy(g_ssid, newSsid, sizeof(g_ssid) - 1);
+    g_ssid[sizeof(g_ssid) - 1] = '\0';
+    strncpy(g_pass, password ? password : "", sizeof(g_pass) - 1);
+    g_pass[sizeof(g_pass) - 1] = '\0';
+
+    prefs.putString("ssid", g_ssid);
+    prefs.putString("pass", g_pass);
+    prefs.end();
+    log_i("active_link: provisioned for \"%s\"", g_ssid);
+    return true;
+}
+
+bool configured() { return g_ssid[0] != '\0'; }
+
+const char* ssid() { return g_ssid; }
 
 void connect() {
     if (!configured()) {
@@ -79,9 +135,44 @@ void connect() {
     esp_wifi_set_promiscuous(false);
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(CSI_WIFI_SSID, CSI_WIFI_PASS);
+    WiFi.begin(g_ssid, g_pass);
     g_state   = State::Connecting;
     g_startAt = millis();
+}
+
+void pollSerialProvisioning() {
+    if (!Serial.available()) return;
+
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty()) return;
+
+    if (line.startsWith("wifi ")) {
+        // "wifi <ssid> <password>". Split on the last space so an SSID
+        // containing spaces still works; passwords with spaces do not.
+        String rest  = line.substring(5);
+        int    split = rest.lastIndexOf(' ');
+        if (split < 0) {
+            Serial.println("usage: wifi <ssid> <password>");
+            return;
+        }
+        String s = rest.substring(0, split);
+        String p = rest.substring(split + 1);
+        s.trim();
+        if (provision(s.c_str(), p.c_str())) {
+            Serial.printf("stored \"%s\", connecting\n", s.c_str());
+            connect();
+        }
+    } else if (line == "wifi-clear") {
+        provision("", "");
+        Serial.println("credentials cleared");
+    } else if (line == "wifi-status") {
+        // Never echo the password back -- the serial log is the one place it
+        // would otherwise end up in plain text.
+        Serial.printf("ssid=%s  password=%s  state=%d\n",
+                      configured() ? g_ssid : "(none)",
+                      g_pass[0] ? "(set)" : "(none)", static_cast<int>(g_state));
+    }
 }
 
 State state() { return g_state; }

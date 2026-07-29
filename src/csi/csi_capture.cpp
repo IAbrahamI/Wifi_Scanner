@@ -54,6 +54,8 @@ float             g_turbulence      = 0.0f;
 int               g_subcarriers     = 0;
 volatile uint32_t g_framesSinceLock = 0;
 volatile uint32_t g_totalFrames     = 0;  // every CSI frame, whatever the source
+volatile uint16_t g_lockLen         = 0;  // frame geometry we committed to
+volatile uint32_t g_wrongShape      = 0;  // right transmitter, wrong geometry
 
 // ---- published to the UI task under g_mux ---------------------------------
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -105,6 +107,8 @@ void resetLearning() {
     g_candidateCount  = 0;
     g_locked          = false;
     g_framesSinceLock = 0;
+    g_lockLen         = 0;
+    g_wrongShape      = 0;
     g_lockDeadline    = millis() + kLockWindowMs;
     g_historyCount    = 0;
     g_calibrated      = false;
@@ -150,6 +154,20 @@ void onCsi(void* /*ctx*/, wifi_csi_info_t* info) {
         return;
     }
     if (memcmp(info->mac, g_lockMac, 6) != 0) return;
+
+    // Lock the frame geometry as well as the transmitter. With HT-LTF enabled
+    // the same AP hands up 64-wide non-HT frames and 128-wide HT frames, and
+    // subcarrier index 20 is a different frequency in each. Averaging them into
+    // one baseline corrupts it in precisely the way mixing transmitters does,
+    // so the first shape seen after lock wins and the rest are dropped.
+    if (g_lockLen == 0) {
+        g_lockLen = info->len;
+        log_i("csi: frame geometry %u bytes (%d subcarriers)", info->len,
+              info->len / 2);
+    } else if (info->len != g_lockLen) {
+        g_wrongShape++;
+        return;
+    }
 
     const int8_t* buf = info->buf;
     int n = info->len / 2;
@@ -222,6 +240,8 @@ void pickTransmitter() {
     memcpy(g_lockMac, g_candidates[best].mac, 6);
     memset(g_slowMean, 0, sizeof(g_slowMean));
     g_framesSinceLock = 0;
+    g_lockLen         = 0;  // re-chosen from the first frame after lock
+    g_wrongShape      = 0;
     g_lockedAt        = millis();
     g_locked          = true;  // set last: the callback starts work on this
     log_i("csi: locked to %02x:%02x:%02x:%02x:%02x:%02x (%u frames in window)",
@@ -257,13 +277,18 @@ void begin(uint8_t channel) {
     esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 
     wifi_csi_config_t cfg = {};
-    cfg.lltf_en           = true;   // the 52-subcarrier legacy long training field
-    cfg.htltf_en          = false;  // HT fields only appear on 802.11n frames
-    cfg.stbc_htltf2_en    = false;
-    cfg.ltf_merge_en      = true;
-    cfg.channel_filter_en = true;
-    cfg.manu_scale        = false;  // let the hardware pick the scaling
-    cfg.shift             = 0;
+    cfg.lltf_en        = true;  // legacy long training field, present on everything
+    cfg.htltf_en       = true;  // 802.11n HT-LTF -- doubles the subcarriers we see
+    cfg.stbc_htltf2_en = true;  // second STBC stream when the AP sends one
+    cfg.ltf_merge_en   = true;
+
+    // Off deliberately. The channel filter smooths each subcarrier against its
+    // neighbours, which is helpful for demodulating a link and actively harmful
+    // here: the fine structure it averages away is the signal we are measuring.
+    cfg.channel_filter_en = false;
+
+    cfg.manu_scale = false;  // let the hardware pick the scaling
+    cfg.shift      = 0;
 
     esp_err_t err = esp_wifi_set_csi_config(&cfg);
     if (err != ESP_OK) log_e("csi: set_csi_config failed: %s", esp_err_to_name(err));
@@ -297,6 +322,8 @@ void useAssociatedLink(const uint8_t bssid[6], uint8_t channel) {
     memcpy(g_lockMac, bssid, 6);
     memset(g_slowMean, 0, sizeof(g_slowMean));
     g_framesSinceLock = 0;
+    g_lockLen         = 0;  // re-chosen from the first frame after lock
+    g_wrongShape      = 0;
     g_lockedAt        = millis();
     g_locked          = true;
 
@@ -419,6 +446,8 @@ void stats(Stats& out) {
     out.channel     = g_channel;
     out.locked      = g_locked;
     out.relocks     = g_relocks;
+    out.wrongShape  = g_wrongShape;
+    out.frameLen    = g_lockLen;
 
     const uint32_t frames = g_framesSinceLock;
     const uint32_t now    = millis();

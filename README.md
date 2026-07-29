@@ -9,6 +9,14 @@ which one boots.
 | 0 | `factory` | `0x010000` | Touch launcher | ✅ built |
 | 1 | `ota_0` | `0x210000` | Wi-Fi CSI radar tracker | ✅ built |
 | 2 | `ota_1` | `0x610000` | Wi-Fi + BLE proximity sniffer | ✅ built |
+| 3 | `ota_2` | `0xA10000` | RF toolkit (5 WiFi/BLE tools) | ✅ built |
+
+The RF toolkit is a *suite*: one flashed binary holding five lightweight tools
+behind a sub-menu — deauth detector, Wi-Fi analyzer, evil-twin detector, BLE
+signal finder, and a BLE HID media remote. They share the radio and display
+code, so packing them into one partition costs far less flash than five
+separate images would, and adding `ota_2` (carved from the old SPIFFS region)
+left the other three apps and your stored Wi-Fi credentials untouched.
 
 ---
 
@@ -32,8 +40,14 @@ bootloader falls back to when `otadata` is blank.
 pio run -e menu    -t upload    # launcher   -> 0x010000
 pio run -e csi     -t upload    # CSI radar  -> 0x210000
 pio run -e scanner -t upload    # WiFi + BLE -> 0x610000
+pio run -e toolkit -t upload    # RF toolkit -> 0xA10000
 pio device monitor
 ```
+
+Adding the toolkit to an already-flashed board only needs `menu` (updated
+partition table + new launcher entry) and `toolkit`. The `csi` and `scanner`
+images keep their offsets, so they do not need re-flashing, and `nvs` is
+untouched so stored Wi-Fi credentials survive.
 
 Each `env` flashes only its own slot, so re-flashing the scanner never disturbs
 the launcher. `tools/app_offset.py` handles this — watch for its line in the
@@ -281,10 +295,64 @@ figure is easily off by 2x.
 
 ### 7. Active mode trade-offs
 
-It transmits, and it needs your SSID and password in `credentials.h` (gitignored).
-Point it at your own access point. What it does *not* compromise is the core
+It transmits, and it needs your network credentials.
+
+**On-device is the preferred way.** Tap `SET UP >` on the channel picker: it
+scans, you pick a network, and you type the password on the touch keyboard. The
+password goes from the glass into NVS and is wiped from RAM immediately — it
+never exists as a file, a build artifact, or a line of terminal scrollback.
+
+NVS lives in its own flash partition, so credentials survive firmware updates:
+`pio run -t upload` rewrites the bootloader, partition table and app and never
+touches it. Only `esptool erase_flash` clears them.
+
+Two fallbacks, both less private:
+
+```
+pio device monitor
+wifi MyNetwork MyPassword     # stored in NVS, connects immediately
+wifi-status                   # reports without echoing the password
+wifi-clear                    # forget
+```
+
+or `credentials.h` (gitignored, compiled into the binary, migrated into NVS on
+first boot — delete it afterwards).
+
+Point it at your own access point. What this does *not* compromise is the core
 premise: the targets being sensed still need no connection, no app, and no
 device on them.
+
+---
+
+## Prior art: RuView
+
+[ruvnet/RuView](https://github.com/ruvnet/RuView) does CSI sensing on the same
+chip and independently arrived at the same architecture, which is a useful
+check on the decisions here. Its firmware **associates to an AP in station
+mode** (`provision.py --ssid --password`) rather than sniffing, and filters CSI
+to a single AP MAC "to prevent signal mixing" — the same two conclusions this
+project reached the hard way. It documents ~20 Hz per channel, which puts the
+0–7 Hz measured here in perspective.
+
+Three things adopted from reading its source:
+
+- **`htltf_en` / `stbc_htltf2_en` on, `channel_filter_en` off.** We had the
+  first two off and the last one on — the worst combination. The channel filter
+  smooths each subcarrier against its neighbours, which averages away exactly
+  the fine structure being measured.
+- **NVS credential provisioning** instead of a compiled-in constant.
+- **Defensive MAC filtering in the callback**, which this project already did.
+
+One thing deliberately *not* adopted: its `csi_inject_ndp_frame()` sends a null
+data packet to the **broadcast** address, and its own comment marks it a
+placeholder with no scheduling. A broadcast NDP elicits no reply from anything,
+so it cannot generate illumination. The ICMP ping stream here is the working
+equivalent.
+
+Worth calibrating expectations against, too: RuView's headline features
+(breathing, heart rate, pose, multi-person counting) come from a multi-node mesh
+plus a separate ~$140 appliance doing the inference. The ESP32 is the sensor,
+not the system.
 
 ---
 
@@ -304,6 +372,13 @@ src/
     illuminator             probe-request illumination (unassociated)
     active_link             associate + ping illumination (needs credentials.h)
   scanner/                  App 2 — WiFi + BLE sniffer
+  toolkit/                  App 3 — RF toolkit suite
+    tool                    shared Tool interface + UI helpers
+    deauth                  deauth/disassoc flood detector
+    analyzer                channel congestion + best-channel pick
+    eviltwin                duplicate/mismatched-SSID detector
+    spotlight               BLE hot/cold signal finder
+    blehid                  BLE media/presenter remote (HID peripheral)
 ```
 
 `build_src_filter` in each env compiles `src/board/` plus exactly one app
@@ -317,8 +392,9 @@ Arduino core 2.0.17) and the upload offsets are verified:
 | Env | Flash used | Slot size | Upload offset |
 | :--- | ---: | ---: | :--- |
 | `menu` | 367 KB | 2 MB | `0x010000` ✅ |
-| `csi` | 787 KB | 4 MB | `0x210000` ✅ |
+| `csi` | 815 KB | 4 MB | `0x210000` ✅ |
 | `scanner` | 979 KB | 4 MB | `0x610000` ✅ |
+| `toolkit` | 1011 KB | 4 MB | `0xA10000` ✅ |
 
 **Run on hardware.** Display, touch, app switching and the Wi-Fi/BLE scanner are
 confirmed working. The CSI radar's capture path and UI are confirmed; its

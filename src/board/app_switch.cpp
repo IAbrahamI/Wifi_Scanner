@@ -14,6 +14,7 @@ const esp_partition_t* find(Slot slot) {
         case Slot::Menu:    sub = ESP_PARTITION_SUBTYPE_APP_FACTORY; break;
         case Slot::Csi:     sub = ESP_PARTITION_SUBTYPE_APP_OTA_0;   break;
         case Slot::Scanner: sub = ESP_PARTITION_SUBTYPE_APP_OTA_1;   break;
+        case Slot::Toolkit: sub = ESP_PARTITION_SUBTYPE_APP_OTA_2;   break;
         default:            return nullptr;
     }
     return esp_partition_find_first(ESP_PARTITION_TYPE_APP, sub, nullptr);

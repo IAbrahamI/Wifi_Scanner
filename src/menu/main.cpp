@@ -18,10 +18,10 @@ namespace {
 constexpr int SCREEN_W = 320;
 constexpr int SCREEN_H = 170;
 
-constexpr int HEADER_H = 28;
-constexpr int ROW_H    = 40;
-constexpr int ROW_GAP  = 6;
-constexpr int ROW_TOP  = HEADER_H + 8;
+constexpr int HEADER_H = 26;
+constexpr int ROW_H    = 38;
+constexpr int ROW_GAP  = 5;
+constexpr int ROW_TOP  = HEADER_H + 6;
 
 constexpr uint16_t COL_BG       = 0x0000;
 constexpr uint16_t COL_HEADER   = 0x1082;  // near-black grey
@@ -41,6 +41,7 @@ struct Entry {
 const Entry kEntries[] = {
     {"CSI RADAR",    "Through-wall motion sensing", Slot::Csi},
     {"WIFI + BLE",   "Ambient proximity sniffer",   Slot::Scanner},
+    {"RF TOOLKIT",   "WiFi/BLE security tools",     Slot::Toolkit},
 };
 constexpr int kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
 

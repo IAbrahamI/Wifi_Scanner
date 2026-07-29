@@ -17,6 +17,7 @@ enum class Slot : uint8_t {
     Menu,     // factory  @ 0x010000 -- launcher
     Csi,      // ota_0    @ 0x210000 -- CSI radar tracker
     Scanner,  // ota_1    @ 0x610000 -- WiFi + BLE proximity sniffer
+    Toolkit,  // ota_2    @ 0xA10000 -- RF security toolkit
 };
 
 // True if a real firmware image has been flashed into that slot. Lets the

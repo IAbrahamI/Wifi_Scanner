@@ -24,7 +24,9 @@
 // ---------------------------------------------------------------------------
 namespace csi_capture {
 
-constexpr int kMaxSubcarriers = 64;
+// LLTF alone is 64. With HT-LTF and the STBC second stream enabled the hardware
+// can hand up to 192 on an HT40 frame.
+constexpr int kMaxSubcarriers = 192;
 constexpr int kHistoryLen     = 160;  // one pixel column each, for the graph
 
 struct Stats {
@@ -41,6 +43,8 @@ struct Stats {
     float    totalRate;    // Hz across every source on the channel
     uint32_t frames;       // frames since lock, for warmup progress
     uint8_t  relocks;      // times we gave up on a too-quiet transmitter
+    uint32_t wrongShape;   // right transmitter, different frame geometry
+    uint16_t frameLen;     // CSI bytes per frame we committed to
     int8_t   rssi;
     uint8_t  channel;
     bool     locked;

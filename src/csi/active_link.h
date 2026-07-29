@@ -24,9 +24,28 @@
 // ---------------------------------------------------------------------------
 namespace active_link {
 
-// True when credentials.h exists and has been filled in.
+// Loads credentials from NVS. Call once at startup, before configured().
+void begin();
+
+// True when a network has been provisioned.
 bool configured();
 const char* ssid();
+
+// Stores credentials in NVS and uses them from now on. Passing an empty ssid
+// clears them.
+//
+// NVS rather than a compiled-in constant: a password baked into the firmware
+// lives in the .bin, in the build directory, and in every copy of the image
+// that gets shared or flashed onto another board. In NVS it stays on the one
+// device it was typed into, and changing networks does not mean a rebuild.
+bool provision(const char* ssid, const char* password);
+
+// Accepts provisioning commands on the serial console. Call from loop().
+//
+//   wifi <ssid> <password>   store and connect
+//   wifi-clear               forget
+//   wifi-status              report without revealing the password
+void pollSerialProvisioning();
 
 // Starts an asynchronous association. Watch state() for the outcome.
 void connect();
