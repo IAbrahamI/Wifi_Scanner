@@ -1,8 +1,13 @@
 # Multi-boot map for the 16 MB flash on the T-Display-S3.
 #
-# Three independent app slots, each holding a complete standalone firmware.
+# Four independent app slots, each holding a complete standalone firmware.
 # The launcher lives in `factory` because that is where the bootloader goes
 # when otadata is blank or corrupt -- it is the guaranteed way home.
+#
+# ota_2 was added later, carved from the oversized spiffs region. factory,
+# ota_0 and ota_1 keep their original offsets, so adding it does not move or
+# invalidate the CSI/scanner images already flashed, and nvs (your Wi-Fi
+# credentials) is untouched.
 #
 # Name,     Type, SubType,  Offset,    Size,      Flags
 nvs,        data, nvs,      0x009000,  0x005000,
@@ -10,4 +15,5 @@ otadata,    data, ota,      0x00E000,  0x002000,
 factory,    app,  factory,  0x010000,  0x200000,
 ota_0,      app,  ota_0,    0x210000,  0x400000,
 ota_1,      app,  ota_1,    0x610000,  0x400000,
-storage,    data, spiffs,   0xA10000,  0x5F0000,
+ota_2,      app,  ota_2,    0xA10000,  0x400000,
+storage,    data, spiffs,   0xE10000,  0x1F0000,
