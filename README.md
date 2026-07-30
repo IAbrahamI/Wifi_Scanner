@@ -6,7 +6,7 @@ which one boots.
 
 | Slot | Partition | Offset | App | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| 0 | `factory` | `0x010000` | Touch launcher | ✅ built |
+| 0 | `factory` | `0x010000` | Touch launcher + Geass idle screen | ✅ built |
 | 1 | `ota_0` | `0x210000` | Wi-Fi CSI radar tracker | ✅ built |
 | 2 | `ota_1` | `0x610000` | Wi-Fi + BLE proximity sniffer | ✅ built |
 | 3 | `ota_2` | `0xA10000` | RF toolkit (5 WiFi/BLE tools) | ✅ built |
@@ -17,6 +17,29 @@ signal finder, and a BLE HID media remote. They share the radio and display
 code, so packing them into one partition costs far less flash than five
 separate images would, and adding `ota_2` (carved from the old SPIFFS region)
 left the other three apps and your stored Wi-Fi credentials untouched.
+
+---
+
+## The device
+
+<p align="center">
+  <img src="assets/images/Eye_Screen.jpg" width="480" alt="Geass idle screen"><br>
+  <em>Idle screen — the Code Geass eye. Tap it to blink; the two side buttons
+  switch between this and the menu.</em>
+</p>
+
+<table>
+  <tr>
+    <td align="center"><img src="assets/images/Gadged_Menu.jpg" width="400" alt="Main launcher menu"></td>
+    <td align="center"><img src="assets/images/Toolkit_Menu.jpg" width="400" alt="RF toolkit sub-menu"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Main launcher</b> — boots each app from its own flash partition</td>
+    <td align="center"><b>RF Toolkit</b> — five passive WiFi/BLE security tools</td>
+  </tr>
+</table>
+
+Running on a LILYGO T-Display-S3 Touch, powered over USB-C.
 
 ---
 
@@ -362,10 +385,15 @@ not the system.
 platformio.ini              build envs, one per app
 partitions_multiapp.csv     16 MB multi-boot map
 boards/                     custom board definition (16 MB flash, octal PSRAM)
+assets/                     source artwork (geass.png) + device photos (images/)
 tools/app_offset.py         redirects each env's upload to its own slot
+tools/img2rgb565.py         converts an image to an embeddable RGB565 header
 src/
   board/                    shared: pinout, LovyanGFX+touch driver, app switching
   menu/                     App 0 — launcher
+    main                    app list + boot-partition switching
+    face                    Geass idle screen (blits the embedded image)
+    geass_image.h           generated RGB565 artwork (see tools/img2rgb565.py)
   csi/                      App 1 — CSI radar
     csi_capture             radio setup, CSI callback, turbulence metric
     channel_survey          measures CSI yield per channel, not just AP count

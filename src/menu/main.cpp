@@ -1,15 +1,22 @@
 // ===========================================================================
 //  App 0 -- Launcher  (factory partition @ 0x010000)
 //
-//  Touch-driven main menu. Tapping an entry writes that app's address into the
-//  boot register and resets. Entries whose partition has never been flashed are
-//  drawn greyed out and do nothing.
+//  Two screens:
+//    FACE  a cyberpunk animated-eyes idle screen (the default, boots here).
+//    MENU  the app list -- tap an entry to write its address into the boot
+//          register and reset. Un-flashed slots are greyed out and inert.
+//
+//  The two physical buttons switch between them: the button by GPIO 0 shows the
+//  MENU, the other (GPIO 14) shows the FACE. Touch still drives selection in the
+//  menu, and poking the face makes it react.
 // ===========================================================================
 
 #include <Arduino.h>
 
 #include "../board/board.h"
 #include "../board/app_switch.h"
+#include "../board/pins.h"
+#include "face.h"
 
 using app_switch::Slot;
 
@@ -25,7 +32,7 @@ constexpr int ROW_TOP  = HEADER_H + 6;
 
 constexpr uint16_t COL_BG       = 0x0000;
 constexpr uint16_t COL_HEADER   = 0x1082;  // near-black grey
-constexpr uint16_t COL_ACCENT   = 0xFD20;  // amber
+constexpr uint16_t COL_ACCENT   = 0xC81F;  // purple (for red use 0xF904)
 constexpr uint16_t COL_CARD     = 0x18E3;
 constexpr uint16_t COL_CARD_SEL = 0x39E7;
 constexpr uint16_t COL_TEXT     = 0xFFFF;
@@ -50,6 +57,9 @@ LGFX_Sprite canvas(&lcd);
 
 int  pressedRow = -1;   // row currently under a finger, -1 for none
 bool installed[kEntryCount];
+
+enum class View { Face, Menu };
+View g_view = View::Face;  // boot into the attract screen
 
 int rowY(int i) { return ROW_TOP + i * (ROW_H + ROW_GAP); }
 
@@ -136,10 +146,20 @@ void setup() {
         installed[i] = app_switch::isInstalled(kEntries[i].slot);
     }
 
-    render();
+    // No initial render() here -- we boot into the face, and loop() paints it on
+    // the first pass. Drawing the menu first would flash it for a frame.
+    face::begin();
 }
 
-void loop() {
+// Edge-detected button read. Returns true once on the press.
+bool pressed(uint8_t pin, bool& prev) {
+    const bool down = digitalRead(pin) == LOW;  // active low
+    const bool edge = down && !prev;
+    prev = down;
+    return edge;
+}
+
+void loopMenu() {
     static bool wasTouched = false;
     static int  lastPressed = -1;
 
@@ -169,6 +189,49 @@ void loop() {
         lastRefresh = millis();
         render();
     }
+}
 
+// The face is a static image, so it is painted once on entry (g_faceDirty) and
+// then left alone -- except while a touch-triggered blink is playing, when it
+// redraws every frame until the animation finishes.
+bool g_faceDirty = true;
+
+void loopFace() {
+    static bool wasTouched = false;
+    int32_t tx, ty;
+    const bool touched = lcd.getTouch(&tx, &ty);
+    if (touched && !wasTouched) face::poke();  // tap = blink
+    wasTouched = touched;
+
+    if (g_faceDirty || face::isAnimating()) {
+        face::update();
+        face::draw(canvas);
+        canvas.pushSprite(0, 0);
+        g_faceDirty = false;
+    }
+}
+
+void loop() {
+    static bool prevBoot = false, prevAux = false;
+
+    // The two buttons flip between the face and the menu. GPIO 0 is also the
+    // escape hatch, but that is a no-op in the launcher (already home), so it is
+    // free to double as the MENU button here.
+    if (pressed(PIN_BUTTON_BOOT, prevBoot) && g_view != View::Menu) {
+        g_view = View::Menu;
+        pressedRow = -1;
+        render();
+    }
+    if (pressed(PIN_BUTTON_1, prevAux) && g_view != View::Face) {
+        g_view = View::Face;
+        g_faceDirty = true;
+        face::begin();
+    }
+
+    if (g_view == View::Face) {
+        loopFace();
+    } else {
+        loopMenu();
+    }
     delay(20);
 }
